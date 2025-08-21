@@ -47,11 +47,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	err = r.ParseMultipartForm(int64(maxMemory))
 	if err != nil {
 		respondWithError(w, 400, err.Error(), err)
+		return
 	}
 
 	file, fileHeader, err := r.FormFile("video")
 	if err != nil {
 		respondWithError(w, 400, err.Error(), err)
+		return
 	}
 
 	defer file.Close()
@@ -67,7 +69,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, 400, "something happened: "+err.Error(), err)
 		return
 	}
-	defer os.Remove("tubely-upload.mp4")
+	defer os.Remove(temp.Name())
 	defer temp.Close()
 
 	_, err = io.Copy(temp, file)
@@ -82,6 +84,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	ratio, err := getVideoAspectRatio(temp.Name())
+	if err != nil {
+		respondWithError(w, 400, "something happened: "+err.Error(), err)
+		return
+	}
+
 	randId := [32]byte{}
 	_, err = rand.Read(randId[:])
 	if err != nil {
@@ -89,9 +97,10 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	base64Id := base64.RawURLEncoding.EncodeToString(randId[:])
+	final := ratio + "/" + base64Id
 	bucketParams := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
-		Key:         &base64Id,
+		Key:         &final,
 		Body:        temp,
 		ContentType: &fileType,
 	}
@@ -102,7 +111,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	url := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, base64Id)
+	url := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, final)
 
 	video.VideoURL = &url
 	err = cfg.db.UpdateVideo(video)
