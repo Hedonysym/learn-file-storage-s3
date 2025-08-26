@@ -65,12 +65,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	temp, err := os.CreateTemp("", "tubely-upload.mp4")
+	defer os.Remove(temp.Name())
+	defer temp.Close()
 	if err != nil {
 		respondWithError(w, 400, "something happened: "+err.Error(), err)
 		return
 	}
-	defer os.Remove(temp.Name())
-	defer temp.Close()
 
 	_, err = io.Copy(temp, file)
 	if err != nil {
@@ -90,6 +90,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	processedPath, err := processVideoForFastStart(temp.Name())
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("shit: %v", err.Error()), err)
+		return
+	}
+
+	processed, err := os.OpenFile(processedPath, os.O_RDONLY, 0666)
+	defer os.Remove(processedPath)
+	defer processed.Close()
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("shit: %v", err.Error()), err)
+		return
+	}
+
 	randId := [32]byte{}
 	_, err = rand.Read(randId[:])
 	if err != nil {
@@ -97,24 +111,31 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	base64Id := base64.RawURLEncoding.EncodeToString(randId[:])
-	final := ratio + "/" + base64Id
+	final := ratio + "/" + base64Id + ".mp4"
 	bucketParams := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &final,
-		Body:        temp,
+		Body:        processed,
 		ContentType: &fileType,
 	}
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &bucketParams)
 	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error uploading file to S3", err)
+		return
+	}
+
+	url := fmt.Sprintf("%v,%v", cfg.s3Bucket, final)
+
+	video.VideoURL = &url
+
+	signedVideo, err := cfg.dbVideoToSignedVideo(video)
+	if err != nil {
 		respondWithError(w, 400, "something happened: "+err.Error(), err)
 		return
 	}
 
-	url := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, final)
-
-	video.VideoURL = &url
-	err = cfg.db.UpdateVideo(video)
+	err = cfg.db.UpdateVideo(signedVideo)
 	if err != nil {
 		respondWithError(w, 400, "database update error", err)
 		return
